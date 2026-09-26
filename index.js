@@ -35,15 +35,16 @@ app.get('/', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`[⚡] System active on port ${port} | Brand: ${_0x_dev_null_identity()}`);
+  console.log(`[⚡] System active on port ${port} \vert{} Brand:${_0x_dev_null_identity()}`);
 });
 
 const { apiId, apiHash, botToken, adminId, sessionFile, joinDelay } = config;
-
+ 
 if (!fs.existsSync(sessionFile)) fs.writeFileSync(sessionFile, "[]");
 let savedSessions = JSON.parse(fs.readFileSync(sessionFile));
 let clients = [];
 let pendingLogins = {};
+let pendingRequests = {}; // Step tracking for /sendrequest
 
 // ADMIN SYSTEM SETUP
 const adminFile = "./admins.json";
@@ -89,8 +90,52 @@ async function init() {
             return message.reply({ message: `⛔ Access Denied! Only ${_0x_dev_null_identity()} and admins can control me.` });
         }
 
-        const args = message.text.split(" ");
+        const text = message.text.trim();
+        const args = text.split(" ");
         const command = args[0].toLowerCase();
+
+        // --- HANDLER FOR LINK INPUT AFTER /sendrequest OR /request ---
+        if (pendingRequests[senderId]) {
+            delete pendingRequests[senderId];
+            const targetLink = text;
+            
+            if (!targetLink.includes("t.me/")) {
+                return message.reply({ message: "❌ अमान्य लिंक! कृपया सही टेलीग्राम लिंक भेजें।" });
+            }
+
+            await message.reply({ message: `⏳ सभी ${clients.length} अकाउंट्स से रिक्वेस्ट भेजी जा रही है...` });
+
+            let success = 0;
+            let failed = 0;
+
+            for (let i = 0; i < clients.length; i++) {
+                try {
+                    // Exported/Imported Invite request handler
+                    let hash = targetLink.split("/").pop().replace("+", "").replace("joinchat/", "").trim();
+                    
+                    await clients[i].invoke(
+                        new Api.messages.ImportChatInvite({
+                            hash: hash
+                        })
+                    );
+                    success++;
+                } catch (e) {
+                    if (e.message.includes("USER_ALREADY_PARTICIPANT")) {
+                        success++;
+                    } else if (e.message.includes("INVITE_REQUEST_SENT")) {
+                        success++;
+                    } else {
+                        console.log(`❌ Account ${i + 1} Error:`, e.message);
+                        failed++;
+                    }
+                }
+                await new Promise(r => setTimeout(r, joinDelay));
+            }
+
+            return message.reply({ 
+                message: `✅ **टास्क पूरा हुआ!**\n\n🎯 **टारगेट:** \`${targetLink}\`\n🎉 **सफल:** ${success}\n❌ **असफल:** ${failed}\n\n🛡️ Powered by ${_0x_dev_null_identity()}` 
+            });
+        }
 
         // --- COMMAND: /START ---
         if (command === "/start") {
@@ -100,13 +145,51 @@ async function init() {
                          "🔹 `/login +91xxxx` - Add Account\n" +
                          "🔹 `/otp 12 345` - Verify OTP\n" +
                          "🔹 `/pass password` - 2FA Login\n" +
+                         "🔹 `/sendrequest` - Send Private Join Request\n" +
                          "🔹 `/joinvc [link]` - Join All to VC\n" +
-                         "🔹 `/leavevc [link]` - Leave All VC\n" +
+                         "🔹 `/leavevc` - Leave All VC\n" +
                          "🔹 `/addadmin [ID]` - Add New Admin\n" +
                          "🔹 `/stats` - Check Active Accounts\n\n" +
                          "🇮🇳 **Developed by @Dev_Null_X**",
                 file: "https://files.catbox.moe/dkxoeu.jpg"
             });
+        }
+
+        // --- COMMAND: /SENDREQUEST & /REQUEST ---
+        else if (command === "/sendrequest" || command === "/request") {
+            // Check if link is passed directly in command (e.g. /request https://t.me/+xyz)
+            if (args[1]) {
+                const targetLink = args[1];
+                await message.reply({ message: `⏳ सभी ${clients.length} अकाउंट्स से रिक्वेस्ट भेजी जा रही है...` });
+
+                let success = 0;
+                let failed = 0;
+
+                for (let i = 0; i < clients.length; i++) {
+                    try {
+                        let hash = targetLink.split("/").pop().replace("+", "").replace("joinchat/", "").trim();
+                        await clients[i].invoke(
+                            new Api.messages.ImportChatInvite({ hash: hash })
+                        );
+                        success++;
+                    } catch (e) {
+                        if (e.message.includes("USER_ALREADY_PARTICIPANT") || e.message.includes("INVITE_REQUEST_SENT")) {
+                            success++;
+                        } else {
+                            failed++;
+                        }
+                    }
+                    await new Promise(r => setTimeout(r, joinDelay));
+                }
+
+                return message.reply({ 
+                    message: `✅ **टास्क पूरा हुआ!**\n\n🎉 **सफल:** ${success}\n❌ **असफल:** ${failed}` 
+                });
+            } else {
+                // Wait for user to send link in next message
+                pendingRequests[senderId] = true;
+                await message.reply({ message: "🔗 **कृपया प्राइवेट चैनल की लिंक भेजें:**" });
+            }
         }
 
         // --- COMMAND: /ADDADMIN ---
@@ -219,32 +302,28 @@ async function init() {
             await message.reply({ message: "✅ Process Completed by @Dev_Null_X!" });
         }
         
-                // --- COMMAND: /LEAVEVC (Ab fully functional hai) ---
+        // --- COMMAND: /LEAVEVC ---
         else if (command === "/leavevc") {
             await message.reply({ message: `📤 Removing ${clients.length} accounts from VC...` });
             
             for (let i = 0; i < clients.length; i++) {
                 try {
-                    // Anti-kick interval ko stop karna zaroori hai
                     if (clients[i].vcInterval) {
                         clearInterval(clients[i].vcInterval);
                         clients[i].vcInterval = null;
                     }
 
-                    // Telegram API ko leave call bhej rahe hain
                     await clients[i].invoke(new Api.phone.LeaveGroupCall({
-                        call: clients[i].currentCall, // Current active call reference
+                        call: clients[i].currentCall,
                         source: 0
                     }));
                     
                 } catch (e) {
-                    // Agar directly leave fail ho toh entity se try karenge
                     console.log(`❌ Account ${i+1} leave error: ${e.message}`);
                 }
             }
             await message.reply({ message: "✅ All accounts have left the Voice Chat! \n🛡️ Powered by @Dev_Null_X" });
         }
-
 
         // --- COMMAND: /STATS ---
         else if (command === "/stats") {
