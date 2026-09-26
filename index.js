@@ -39,12 +39,12 @@ app.listen(port, () => {
 });
 
 const { apiId, apiHash, botToken, adminId, sessionFile, joinDelay } = config;
- 
+
 if (!fs.existsSync(sessionFile)) fs.writeFileSync(sessionFile, "[]");
 let savedSessions = JSON.parse(fs.readFileSync(sessionFile));
 let clients = [];
 let pendingLogins = {};
-let pendingRequests = {}; // Step tracking for /sendrequest
+let pendingRequests = {}; 
 
 // ADMIN SYSTEM SETUP
 const adminFile = "./admins.json";
@@ -68,13 +68,39 @@ async function init() {
     console.log("\x1b[33m%s\x1b[0m", "🇮🇳  NODE.JS INDIA DEVELOPERS HUB ACTIVE     ");
     console.log("\x1b[36m%s\x1b[0m", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    for (const sessionStr of savedSessions) {
+    // FIXED: Auto Re-connecting Saved User Sessions Properly
+    clients = [];
+    let validSessions = [];
+
+    console.log(`📡 Checking saved accounts (${savedSessions.length})...`);
+
+    for (let i = 0; i < savedSessions.length; i++) {
+        const sessionStr = savedSessions[i];
         try {
             const client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, { connectionRetries: 5 });
             await client.connect();
-            clients.push(client);
-        } catch (e) { console.log("⚠️ Failed session."); }
+            
+            // Check if session is still authorized on Telegram Server
+            const me = await client.getMe();
+            if (me) {
+                clients.push(client);
+                validSessions.push(sessionStr);
+                console.log(`✅ Loaded Account ${clients.length}:${me.firstName || me.username || me.id}`);
+            } else {
+                console.log(`⚠️ Session ${i + 1} expired/invalid.`);
+            }
+        } catch (e) { 
+            console.log(`⚠️ Failed to restore session ${i + 1}:${e.message}`); 
+        }
     }
+
+    // Save back only valid working sessions
+    if (validSessions.length !== savedSessions.length) {
+        savedSessions = validSessions;
+        fs.writeFileSync(sessionFile, JSON.stringify(savedSessions));
+    }
+
+    console.log(`🎉 Total Active Saved Accounts Restored: ${clients.length}`);
 
     const botClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 5 });
     await botClient.start({ botAuthToken: botToken });
@@ -110,7 +136,6 @@ async function init() {
 
             for (let i = 0; i < clients.length; i++) {
                 try {
-                    // Exported/Imported Invite request handler
                     let hash = targetLink.split("/").pop().replace("+", "").replace("joinchat/", "").trim();
                     
                     await clients[i].invoke(
@@ -120,9 +145,7 @@ async function init() {
                     );
                     success++;
                 } catch (e) {
-                    if (e.message.includes("USER_ALREADY_PARTICIPANT")) {
-                        success++;
-                    } else if (e.message.includes("INVITE_REQUEST_SENT")) {
+                    if (e.message.includes("USER_ALREADY_PARTICIPANT") || e.message.includes("INVITE_REQUEST_SENT")) {
                         success++;
                     } else {
                         console.log(`❌ Account ${i + 1} Error:`, e.message);
@@ -157,7 +180,6 @@ async function init() {
 
         // --- COMMAND: /SENDREQUEST & /REQUEST ---
         else if (command === "/sendrequest" || command === "/request") {
-            // Check if link is passed directly in command (e.g. /request https://t.me/+xyz)
             if (args[1]) {
                 const targetLink = args[1];
                 await message.reply({ message: `⏳ सभी ${clients.length} अकाउंट्स से रिक्वेस्ट भेजी जा रही है...` });
@@ -186,7 +208,6 @@ async function init() {
                     message: `✅ **टास्क पूरा हुआ!**\n\n🎉 **सफल:** ${success}\n❌ **असफल:** ${failed}` 
                 });
             } else {
-                // Wait for user to send link in next message
                 pendingRequests[senderId] = true;
                 await message.reply({ message: "🔗 **कृपया प्राइवेट चैनल की लिंक भेजें:**" });
             }
