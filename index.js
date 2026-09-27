@@ -40,8 +40,30 @@ app.listen(port, () => {
 
 const { apiId, apiHash, botToken, adminId, sessionFile, joinDelay } = config;
 
-if (!fs.existsSync(sessionFile)) fs.writeFileSync(sessionFile, "[]");
-let savedSessions = JSON.parse(fs.readFileSync(sessionFile));
+// Session loading helper functions
+function loadSessionsFromFile() {
+    try {
+        if (!fs.existsSync(sessionFile)) {
+            fs.writeFileSync(sessionFile, JSON.stringify([]));
+            return [];
+        }
+        const data = fs.readFileSync(sessionFile, "utf-8");
+        return JSON.parse(data);
+    } catch (err) {
+        console.error(" Error reading session file:", err.message);
+        return [];
+    }
+}
+
+function saveSessionsToFile(sessions) {
+    try {
+        fs.writeFileSync(sessionFile, JSON.stringify(sessions, null, 2));
+    } catch (err) {
+        console.error(" Error saving session file:", err.message);
+    }
+}
+
+let savedSessions = loadSessionsFromFile();
 let clients = [];
 let pendingLogins = {};
 let pendingRequests = {}; 
@@ -51,10 +73,14 @@ const adminFile = "./admins.json";
 let adminList = [];
 
 if (fs.existsSync(adminFile)) {
-    adminList = JSON.parse(fs.readFileSync(adminFile));
+    try {
+        adminList = JSON.parse(fs.readFileSync(adminFile, "utf-8"));
+    } catch (e) {
+        adminList = adminId.toString().split(',').map(id => id.trim());
+    }
 } else {
     adminList = adminId.toString().split(',').map(id => id.trim());
-    fs.writeFileSync(adminFile, JSON.stringify(adminList));
+    fs.writeFileSync(adminFile, JSON.stringify(adminList, null, 2));
 }
 
 let lastLoginTime = 0; 
@@ -68,7 +94,7 @@ async function init() {
     console.log("\x1b[33m%s\x1b[0m", "🇮🇳  NODE.JS INDIA DEVELOPERS HUB ACTIVE     ");
     console.log("\x1b[36m%s\x1b[0m", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    // FIXED: Auto Re-connecting Saved User Sessions Properly
+    savedSessions = loadSessionsFromFile();
     clients = [];
     let validSessions = [];
 
@@ -76,6 +102,8 @@ async function init() {
 
     for (let i = 0; i < savedSessions.length; i++) {
         const sessionStr = savedSessions[i];
+        if (!sessionStr) continue;
+
         try {
             const client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, { connectionRetries: 5 });
             await client.connect();
@@ -87,18 +115,18 @@ async function init() {
                 validSessions.push(sessionStr);
                 console.log(`✅ Loaded Account ${clients.length}:${me.firstName || me.username || me.id}`);
             } else {
-                console.log(`⚠️ Session ${i + 1} expired/invalid.`);
+                console.log(`⚠️ Session ${i + 1} is not authorized.`);
             }
         } catch (e) { 
-            console.log(`⚠️ Failed to restore session ${i + 1}:${e.message}`); 
+            console.log(`⚠️ Failed to restore session ${i + 1}:${e.message}`);
+            // Net/Timeout issues ke कारण session न हटाएँ, रख लें
+            validSessions.push(sessionStr);
         }
     }
 
-    // Save back only valid working sessions
-    if (validSessions.length !== savedSessions.length) {
-        savedSessions = validSessions;
-        fs.writeFileSync(sessionFile, JSON.stringify(savedSessions));
-    }
+    // Save back working/retained sessions
+    savedSessions = validSessions;
+    saveSessionsToFile(savedSessions);
 
     console.log(`🎉 Total Active Saved Accounts Restored: ${clients.length}`);
 
@@ -220,7 +248,7 @@ async function init() {
             if (adminList.includes(newAdmin)) return message.reply({ message: "⚠️ Already an admin." });
 
             adminList.push(newAdmin);
-            fs.writeFileSync(adminFile, JSON.stringify(adminList));
+            fs.writeFileSync(adminFile, JSON.stringify(adminList, null, 2));
             await message.reply({ message: `✅ New admin authorized: \`${newAdmin}\`` });
         }
 
@@ -238,7 +266,140 @@ async function init() {
             if (pendingLogins[senderId]) return message.reply({ message: "⚠️ Login already in progress." });
 
             await message.reply({ message: "📡 Connecting to Telegram Servers..." });
-            const tempClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 1 });
+            const tempClient = new TelegramClient(new StringSession(""), apiId, apiHash, { connectionRetries: 5 });
+            pendingLogins[senderId] = { client: tempClient, phone: phone };
+
+            tempClient.start({
+                phoneNumber: phone,
+                phoneCode: async () => {
+                    await message.reply({ message: `📩 OTP Sent to ${phone}.\nReply: \`/otp 12 345\`` });
+                    pendingLogins[senderId].otpPromise = new Promise(resolve => pendingLogins[senderId].resolveOtp = resolve);
+                    return await pendingLogins[senderId].otpPromise;
+                },
+                password: async () => {
+                    await message.reply({ message: "🔐 2FA Detected. Reply: \`/pass your_password\`" });
+                    pendingLogins[senderId].passPromise = new Promise(resolve => pendingLogins[senderId].resolvePass = resolve);
+                    return await pendingLogins[senderId].passPromise;
+                }
+            }).then(async () => {
+                await saveAccount(tempClient, message);
+            }).catch(async (err) => {
+                await message.reply({ message: "❌ Login Failed: " + err.message });
+                delete pendingLogins[senderId];
+            });
+        }
+
+        // --- COMMAND: /OTP ---
+        else if (command === "/otp") {
+            const otp = args.slice(1).join("").replace(/[^0-9]/g, ''); 
+            const data = pendingLogins[senderId];
+            if (!data || !data.resolveOtp) return message.reply({ message: "❌ Use /login first." });
+            data.resolveOtp(otp); 
+        }
+
+        else if (command === "/pass") {
+            const pass = args[1];
+            if (pendingLogins[senderId]?.resolvePass) {
+                await message.reply({ message: "⏳ Verifying Password..." });
+                pendingLogins[senderId].resolvePass(pass);
+            }
+        }
+        
+        // --- COMMAND: /JOINVC ---
+        else if (command === "/joinvc") {
+            const target = args[1];
+            if (!target) return message.reply({ message: "⚠️ Usage: `/joinvc https://t.me/group`" });
+            
+            await message.reply({ message: `⚡ Deploying ${clients.length} accounts by ${_0x_dev_null_identity()}...` });
+            let targetStr = target.replace("https://t.me/", "").replace("@", "").trim();
+
+            for (let i = 0; i < clients.length; i++) {
+                try {
+                    let chatEntity = await clients[i].getEntity(targetStr);
+                    let callObject;
+                    
+                    try {
+                        const full = await clients[i].invoke(new Api.channels.GetFullChannel({ channel: chatEntity }));
+                        callObject = full.fullChat.call;
+                    } catch (e) {
+                        const full = await clients[i].invoke(new Api.messages.GetFullChat({ chatId: chatEntity.id }));
+                        callObject = full.fullChat.call;
+                    }
+
+                    if (!callObject) throw new Error("No active VC found.");
+
+                    const randomSsrc = Math.floor(Math.random() * 100000000);
+                    const me = await clients[i].getMe();
+
+                    const joinParams = {
+                        call: callObject,
+                        joinAs: me,
+                        params: new Api.DataJSON({ data: JSON.stringify({ ssrc: randomSsrc }) }),
+                        muted: true
+                    };
+
+                    await clients[i].invoke(new Api.phone.JoinGroupCall(joinParams));
+                    
+                    if (clients[i].vcInterval) clearInterval(clients[i].vcInterval);
+                    clients[i].vcInterval = setInterval(async () => {
+                        try { await clients[i].invoke(new Api.phone.JoinGroupCall(joinParams)); } catch (e) {} 
+                    }, 50 * 1000); 
+
+                    await new Promise(r => setTimeout(r, joinDelay)); 
+                } catch (e) { console.log(`❌ Account ${i+1} failed: ${e.message}`); }
+            }
+            await message.reply({ message: "✅ Process Completed by @Dev_Null_X!" });
+        }
+        
+        // --- COMMAND: /LEAVEVC ---
+        else if (command === "/leavevc") {
+            await message.reply({ message: `📤 Removing ${clients.length} accounts from VC...` });
+            
+            for (let i = 0; i < clients.length; i++) {
+                try {
+                    if (clients[i].vcInterval) {
+                        clearInterval(clients[i].vcInterval);
+                        clients[i].vcInterval = null;
+                    }
+
+                    await clients[i].invoke(new Api.phone.LeaveGroupCall({
+                        call: clients[i].currentCall,
+                        source: 0
+                    }));
+                    
+                } catch (e) {
+                    console.log(`❌ Account ${i+1} leave error: ${e.message}`);
+                }
+            }
+            await message.reply({ message: "✅ All accounts have left the Voice Chat! \n🛡️ Powered by @Dev_Null_X" });
+        }
+
+        // --- COMMAND: /STATS ---
+        else if (command === "/stats") {
+            await message.reply({ message: `📊 **${_0x_dev_null_identity()} System Stats**\n\n✅ **Active Accounts:** ${clients.length}\n🇮🇳 **Region:** India\n🛡 **Status:** Secured` });
+        }
+        
+    }, new NewMessage({ incoming: true }));
+}
+
+async function saveAccount(client, message) {
+    const sessionStr = client.session.save();
+    
+    // Ensure duplicates are not saved
+    if (!savedSessions.includes(sessionStr)) {
+        savedSessions.push(sessionStr);
+        saveSessionsToFile(savedSessions);
+    }
+    
+    clients.push(client);
+    lastLoginTime = Date.now();
+    
+    await message.reply({ message: `✅ Account linked to ${_0x_dev_null_identity()} successfully!` });
+    if (message.senderId) delete pendingLogins[message.senderId.toString()];
+}
+
+init().catch(console.error);
+ctionRetries: 1 });
             pendingLogins[senderId] = { client: tempClient, phone: phone };
 
             tempClient.start({
