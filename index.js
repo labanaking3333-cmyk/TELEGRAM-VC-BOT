@@ -119,7 +119,7 @@ async function init() {
             }
         } catch (e) { 
             console.log(`⚠️ Failed to restore session ${i + 1}:${e.message}`);
-            // Net/Timeout issues ke कारण session न हटाएँ, रख लें
+            // नेटवर्क या टाइमआउट के कारण सेशन न हटाएं
             validSessions.push(sessionStr);
         }
     }
@@ -297,6 +297,7 @@ async function init() {
             data.resolveOtp(otp); 
         }
 
+        // --- COMMAND: /PASS ---
         else if (command === "/pass") {
             const pass = args[1];
             if (pendingLogins[senderId]?.resolvePass) {
@@ -385,140 +386,11 @@ async function init() {
 async function saveAccount(client, message) {
     const sessionStr = client.session.save();
     
-    // Ensure duplicates are not saved
     if (!savedSessions.includes(sessionStr)) {
         savedSessions.push(sessionStr);
         saveSessionsToFile(savedSessions);
     }
     
-    clients.push(client);
-    lastLoginTime = Date.now();
-    
-    await message.reply({ message: `✅ Account linked to ${_0x_dev_null_identity()} successfully!` });
-    if (message.senderId) delete pendingLogins[message.senderId.toString()];
-}
-
-init().catch(console.error);
-ctionRetries: 1 });
-            pendingLogins[senderId] = { client: tempClient, phone: phone };
-
-            tempClient.start({
-                phoneNumber: phone,
-                phoneCode: async () => {
-                    await message.reply({ message: `📩 OTP Sent to ${phone}.\nReply: \`/otp 12 345\`` });
-                    pendingLogins[senderId].otpPromise = new Promise(resolve => pendingLogins[senderId].resolveOtp = resolve);
-                    return await pendingLogins[senderId].otpPromise;
-                },
-                password: async () => {
-                    await message.reply({ message: "🔐 2FA Detected. Reply: \`/pass your_password\`" });
-                    pendingLogins[senderId].passPromise = new Promise(resolve => pendingLogins[senderId].resolvePass = resolve);
-                    return await pendingLogins[senderId].passPromise;
-                }
-            }).then(async () => {
-                await saveAccount(tempClient, message);
-            }).catch(async (err) => {
-                await message.reply({ message: "❌ Login Failed: " + err.message });
-                delete pendingLogins[senderId];
-            });
-        }
-
-        // --- COMMAND: /OTP ---
-        else if (command === "/otp") {
-            const otp = args.slice(1).join("").replace(/[^0-9]/g, ''); 
-            const data = pendingLogins[senderId];
-            if (!data || !data.resolveOtp) return message.reply({ message: "❌ Use /login first." });
-            data.resolveOtp(otp); 
-        }
-
-        else if (command === "/pass") {
-            const pass = args[1];
-            if (pendingLogins[senderId]?.resolvePass) {
-                await message.reply({ message: "⏳ Verifying Password..." });
-                pendingLogins[senderId].resolvePass(pass);
-            }
-        }
-        
-        // --- COMMAND: /JOINVC ---
-        else if (command === "/joinvc") {
-            const target = args[1];
-            if (!target) return message.reply({ message: "⚠️ Usage: `/joinvc https://t.me/group`" });
-            
-            await message.reply({ message: `⚡ Deploying ${clients.length} accounts by ${_0x_dev_null_identity()}...` });
-            let targetStr = target.replace("https://t.me/", "").replace("@", "").trim();
-
-            for (let i = 0; i < clients.length; i++) {
-                try {
-                    let chatEntity = await clients[i].getEntity(targetStr);
-                    let callObject;
-                    
-                    try {
-                        const full = await clients[i].invoke(new Api.channels.GetFullChannel({ channel: chatEntity }));
-                        callObject = full.fullChat.call;
-                    } catch (e) {
-                        const full = await clients[i].invoke(new Api.messages.GetFullChat({ chatId: chatEntity.id }));
-                        callObject = full.fullChat.call;
-                    }
-
-                    if (!callObject) throw new Error("No active VC found.");
-
-                    const randomSsrc = Math.floor(Math.random() * 100000000);
-                    const me = await clients[i].getMe();
-
-                    const joinParams = {
-                        call: callObject,
-                        joinAs: me,
-                        params: new Api.DataJSON({ data: JSON.stringify({ ssrc: randomSsrc }) }),
-                        muted: true
-                    };
-
-                    await clients[i].invoke(new Api.phone.JoinGroupCall(joinParams));
-                    
-                    if (clients[i].vcInterval) clearInterval(clients[i].vcInterval);
-                    clients[i].vcInterval = setInterval(async () => {
-                        try { await clients[i].invoke(new Api.phone.JoinGroupCall(joinParams)); } catch (e) {} 
-                    }, 50 * 1000); 
-
-                    await new Promise(r => setTimeout(r, joinDelay)); 
-                } catch (e) { console.log(`❌ Account ${i+1} failed: ${e.message}`); }
-            }
-            await message.reply({ message: "✅ Process Completed by @Dev_Null_X!" });
-        }
-        
-        // --- COMMAND: /LEAVEVC ---
-        else if (command === "/leavevc") {
-            await message.reply({ message: `📤 Removing ${clients.length} accounts from VC...` });
-            
-            for (let i = 0; i < clients.length; i++) {
-                try {
-                    if (clients[i].vcInterval) {
-                        clearInterval(clients[i].vcInterval);
-                        clients[i].vcInterval = null;
-                    }
-
-                    await clients[i].invoke(new Api.phone.LeaveGroupCall({
-                        call: clients[i].currentCall,
-                        source: 0
-                    }));
-                    
-                } catch (e) {
-                    console.log(`❌ Account ${i+1} leave error: ${e.message}`);
-                }
-            }
-            await message.reply({ message: "✅ All accounts have left the Voice Chat! \n🛡️ Powered by @Dev_Null_X" });
-        }
-
-        // --- COMMAND: /STATS ---
-        else if (command === "/stats") {
-            await message.reply({ message: `📊 **${_0x_dev_null_identity()} System Stats**\n\n✅ **Active Accounts:** ${clients.length}\n🇮🇳 **Region:** India\n🛡 **Status:** Secured` });
-        }
-        
-    }, new NewMessage({ incoming: true }));
-}
-
-async function saveAccount(client, message) {
-    const sessionStr = client.session.save();
-    savedSessions.push(sessionStr);
-    fs.writeFileSync(sessionFile, JSON.stringify(savedSessions));
     clients.push(client);
     lastLoginTime = Date.now();
     
